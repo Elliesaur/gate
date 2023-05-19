@@ -64,13 +64,16 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
+      - id: string
+        uses: ASzc/change-string-case-action@v1
+        with:
+          string: ${{ github.repository }}
       - name: Create image ref
         id: image-ref
         run: |
           REF=$(git rev-parse --short $GITHUB_SHA)
-          IMAGE=${{ env.REGISTRY }}/${{ github.repository }}:${REF}
-          IMAGE_LATEST=${{ env.REGISTRY }}/${{ github.repository }}:latest
+          IMAGE=${{ env.REGISTRY }}/${{ steps.string.outputs.lowercase }}:${REF}
+          IMAGE_LATEST=${{ env.REGISTRY }}/${{ steps.string.outputs.lowercase }}:latest
           
           echo "image=${IMAGE}" >> $GITHUB_STATE
           echo "image_latest=${IMAGE_LATEST}" >> $GITHUB_OUTPUT
