@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/spf13/viper"
 	"net"
 	"strings"
 	"sync"
@@ -134,6 +135,44 @@ func (p *Proxy) Start(ctx context.Context) error {
 	p.startTime.Store(time.Now())
 	p.log = logr.FromContextOrDiscard(ctx)
 
+	// Update config file from disk.
+	ticker := time.NewTicker(5 * time.Second)
+	quit := make(chan struct{})
+
+	// Set up hot config.
+	v := viper.GetViper()
+	v.SetConfigName("hotConfig")
+	v.AddConfigPath(".")
+	v.SetEnvPrefix("GATE")
+	v.AutomaticEnv()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				cfg := func() config.Config { return config.DefaultConfig }()
+				err := v.ReadInConfig()
+				if err != nil {
+					p.log.Info("Failed to read hot configuration file, continuing")
+					continue
+				}
+				// Read in config
+				if err := v.Unmarshal(&cfg); err != nil {
+					p.log.Info("Failed to process hot configuration, continuing")
+					continue
+				}
+				// Update configuration.
+				p.cfg = &cfg
+				p.log.Info("Updated hot configuration file")
+			case <-quit:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+
+	defer func() { close(quit) }()
 	stopListener := make(chan struct{})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
