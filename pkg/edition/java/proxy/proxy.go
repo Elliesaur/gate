@@ -20,11 +20,12 @@ import (
 	"go.minekube.com/gate/pkg/edition/java/auth"
 	"go.minekube.com/gate/pkg/edition/java/config"
 	"go.minekube.com/gate/pkg/edition/java/netmc"
-	protoutil "go.minekube.com/gate/pkg/edition/java/proto/util"
+	"go.minekube.com/gate/pkg/edition/java/proto/version"
 	"go.minekube.com/gate/pkg/edition/java/proxy/message"
 	"go.minekube.com/gate/pkg/gate/proto"
 	"go.minekube.com/gate/pkg/internal/addrquota"
 	"go.minekube.com/gate/pkg/internal/connwrap"
+	"go.minekube.com/gate/pkg/util/componentutil"
 	"go.minekube.com/gate/pkg/util/errs"
 	"go.minekube.com/gate/pkg/util/favicon"
 	"go.minekube.com/gate/pkg/util/netutil"
@@ -41,7 +42,7 @@ type Proxy struct {
 	channelRegistrar *message.ChannelRegistrar
 	authenticator    auth.Authenticator
 
-	startTime atomic.Value
+	startTime atomic.Pointer[time.Time]
 
 	closeMu       sync.Mutex
 	closeListener chan struct{}
@@ -132,7 +133,8 @@ func (p *Proxy) Start(ctx context.Context) error {
 		return ErrProxyAlreadyRun
 	}
 	p.started = true
-	p.startTime.Store(time.Now())
+	now := time.Now()
+	p.startTime.Store(&now)
 	p.log = logr.FromContextOrDiscard(ctx)
 
 	// Update config file from disk.
@@ -229,7 +231,7 @@ func (p *Proxy) Shutdown(reason component.Component) {
 	defer func() {
 		p.log.Info("finished shutdown.",
 			"shutdownTime", time.Since(shutdownTime).Round(time.Microsecond).String(),
-			"totalTime", time.Since(p.startTime.Load().(time.Time)).Round(time.Millisecond).String())
+			"totalTime", time.Since(*p.startTime.Load()).Round(time.Millisecond).String())
 	}()
 
 	pre := &PreShutdownEvent{reason: reason}
@@ -304,7 +306,7 @@ func (p *Proxy) loadShutdownReason() (err error) {
 	if len(c.ShutdownReason) == 0 {
 		return nil
 	}
-	p.shutdownReason, err = parseTextComponentFromConfig(c.ShutdownReason)
+	p.shutdownReason, err = componentutil.ParseTextComponent(version.Legacy.Protocol, c.ShutdownReason)
 	return
 }
 
@@ -313,25 +315,8 @@ func (p *Proxy) loadMotd() (err error) {
 	if len(c.Status.Motd) == 0 {
 		return nil
 	}
-	p.motd, err = parseTextComponentFromConfig(c.Status.Motd)
+	p.motd, err = componentutil.ParseTextComponent(version.Legacy.Protocol, c.Status.Motd)
 	return
-}
-
-func parseTextComponentFromConfig(s string) (t *component.Text, err error) {
-	var c component.Component
-	if strings.HasPrefix(s, "{") {
-		c, err = protoutil.LatestJsonCodec().Unmarshal([]byte(s))
-	} else {
-		c, err = (&legacy.Legacy{}).Unmarshal([]byte(s))
-	}
-	if err != nil {
-		return nil, err
-	}
-	t, ok := c.(*component.Text)
-	if !ok {
-		return nil, errors.New("invalid text component")
-	}
-	return t, nil
 }
 
 // initializes favicon from the cfg
@@ -340,17 +325,8 @@ func (p *Proxy) loadFavicon() (err error) {
 	if len(c.Status.Favicon) == 0 {
 		return nil
 	}
-	if strings.HasPrefix(c.Status.Favicon, "data:image/") {
-		p.favicon = favicon.Favicon(c.Status.Favicon)
-		p.log.Info("Using favicon from data uri", "length", len(p.favicon))
-	} else {
-		p.favicon, err = favicon.FromFile(c.Status.Favicon)
-		if err != nil {
-			return fmt.Errorf("error reading favicon file %q: %w", c.Status.Favicon, err)
-		}
-		p.log.Info("Using favicon file", "file", c.Status.Favicon)
-	}
-	return nil
+	p.favicon, err = favicon.Parse(c.Status.Favicon)
+	return err
 }
 
 func (p *Proxy) initPlugins(ctx context.Context) error {

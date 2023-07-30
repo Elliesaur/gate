@@ -1,10 +1,13 @@
 package gate
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -12,8 +15,10 @@ import (
 	"github.com/spf13/viper"
 	"github.com/urfave/cli/v2"
 	"go.minekube.com/gate/pkg/gate"
+	"go.minekube.com/gate/pkg/gate/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"gopkg.in/yaml.v3"
 )
 
 // Execute runs App() and calls os.Exit when finished.
@@ -32,7 +37,7 @@ func App() *cli.App {
 	app.Description = `A high performant & paralleled Minecraft proxy server with
 	scalability, flexibility & excelled server version support.
 
-Visit the website https://developers.minekube.com/gate`
+Visit the website https://gate.minekube.com/ for more information.`
 
 	var (
 		debug      bool
@@ -41,10 +46,9 @@ Visit the website https://developers.minekube.com/gate`
 	)
 	app.Flags = []cli.Flag{
 		&cli.StringFlag{
-			Name:    "config",
-			Aliases: []string{"c"},
-			Usage: `config file (default: ./config.yml)
-Supports: yaml/yml, json, toml, hcl, ini, prop/properties/props, env/dotenv`,
+			Name:        "config",
+			Aliases:     []string{"c"},
+			Usage:       `config file (default: ./config.yml) Supports: yaml, json, env`,
 			EnvVars:     []string{"GATE_CONFIG"},
 			Destination: &configFile,
 		},
@@ -115,13 +119,59 @@ func initViper(c *cli.Context, configFile string) (*viper.Viper, error) {
 	v.AutomaticEnv() // read in environment variables that match
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	// Read in config.
-	if err := v.ReadInConfig(); err != nil {
+	cfgCopy := func() config.Config { return config.DefaultConfig }()
+	if err := FixedReadInConfig(v, configFile, &cfgCopy); err != nil {
 		// A config file is only required to exist when explicit config flag was specified.
 		if !(errors.As(err, &viper.ConfigFileNotFoundError{}) || os.IsNotExist(err)) || c.IsSet("config") {
 			return nil, fmt.Errorf("error reading config file %q: %w", v.ConfigFileUsed(), err)
 		}
 	}
 	return v, nil
+}
+
+// FixedReadInConfig is a workaround for https://github.com/minekube/gate/issues/218#issuecomment-1632800775
+func FixedReadInConfig[T any](v *viper.Viper, configFile string, defaultConfig *T) error {
+	if defaultConfig == nil {
+		return v.ReadInConfig()
+	}
+
+	if configFile == "" {
+		// Try to find config file using Viper's config finder logic
+		if err := v.ReadInConfig(); err != nil {
+			return err
+		}
+		configFile = v.ConfigFileUsed()
+		if configFile == "" {
+			return nil // no config file found
+		}
+	}
+
+	var (
+		unmarshal func([]byte, any) error
+		marshal   func(any) ([]byte, error)
+	)
+	switch path.Ext(configFile) {
+	case ".yaml", ".yml":
+		unmarshal = yaml.Unmarshal
+		marshal = yaml.Marshal
+	case ".json":
+		unmarshal = json.Unmarshal
+		marshal = json.Marshal
+	default:
+		return fmt.Errorf("unsupported config file format %q", configFile)
+	}
+	b, err := os.ReadFile(configFile)
+	if err != nil {
+		return fmt.Errorf("error reading config file %q: %w", configFile, err)
+	}
+	if err = unmarshal(b, defaultConfig); err != nil {
+		return fmt.Errorf("error unmarshaling config file %q to %T: %w", configFile, defaultConfig, err)
+	}
+	if b, err = marshal(defaultConfig); err != nil {
+		return fmt.Errorf("error marshaling config file %q: %w", configFile, err)
+	}
+
+	return v.ReadConfig(bytes.NewReader(b))
 }
 
 // newLogger returns a new zap logger with a modified production
