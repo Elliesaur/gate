@@ -204,7 +204,7 @@ func (p *Proxy) Start(ctx context.Context) error {
 			select {
 			case <-ticker.C:
 				cfg := func() config.Config { return config.DefaultConfig }()
-				if err := FixedReadInConfig(v, "hotConfig", &cfg); err != nil {
+				if err := FixedReadInConfig(v, "hotConfig.yml", &cfg); err != nil {
 					p.log.Info("Failed to read hot configuration file, continuing")
 					continue
 				}
