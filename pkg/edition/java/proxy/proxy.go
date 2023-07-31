@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 	"net"
+	"os"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +18,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/pires/go-proxyproto"
 	"github.com/robinbraemer/event"
+	"github.com/spf13/viper"
 	"go.minekube.com/common/minecraft/component"
 	"go.minekube.com/common/minecraft/component/codec/legacy"
 	"go.minekube.com/gate/pkg/command"
@@ -121,6 +126,51 @@ func New(options Options) (p *Proxy, err error) {
 // ErrProxyAlreadyRun is returned by Proxy.Run if the proxy instance was already run.
 var ErrProxyAlreadyRun = errors.New("proxy was already run, create a new one")
 
+// FixedReadInConfig is a workaround for https://github.com/minekube/gate/issues/218#issuecomment-1632800775
+func FixedReadInConfig[T any](v *viper.Viper, configFile string, defaultConfig *T) error {
+	if defaultConfig == nil {
+		return v.ReadInConfig()
+	}
+
+	if configFile == "" {
+		// Try to find config file using Viper's config finder logic
+		if err := v.ReadInConfig(); err != nil {
+			return err
+		}
+		configFile = v.ConfigFileUsed()
+		if configFile == "" {
+			return nil // no config file found
+		}
+	}
+
+	var (
+		unmarshal func([]byte, any) error
+		marshal   func(any) ([]byte, error)
+	)
+	switch path.Ext(configFile) {
+	case ".yaml", ".yml":
+		unmarshal = yaml.Unmarshal
+		marshal = yaml.Marshal
+	case ".json":
+		unmarshal = json.Unmarshal
+		marshal = json.Marshal
+	default:
+		return fmt.Errorf("unsupported config file format %q", configFile)
+	}
+	b, err := os.ReadFile(configFile)
+	if err != nil {
+		return fmt.Errorf("error reading config file %q: %w", configFile, err)
+	}
+	if err = unmarshal(b, defaultConfig); err != nil {
+		return fmt.Errorf("error unmarshaling config file %q to %T: %w", configFile, defaultConfig, err)
+	}
+	if b, err = marshal(defaultConfig); err != nil {
+		return fmt.Errorf("error marshaling config file %q: %w", configFile, err)
+	}
+
+	return v.ReadConfig(bytes.NewReader(b))
+}
+
 // Start runs the Java edition Proxy, blocks until the proxy is
 // Shutdown or an error occurred while starting.
 // The Proxy is already shutdown on method return.
@@ -154,8 +204,7 @@ func (p *Proxy) Start(ctx context.Context) error {
 			select {
 			case <-ticker.C:
 				cfg := func() config.Config { return config.DefaultConfig }()
-				err := v.ReadInConfig()
-				if err != nil {
+				if err := FixedReadInConfig(v, "hotConfig", &cfg); err != nil {
 					p.log.Info("Failed to read hot configuration file, continuing")
 					continue
 				}
